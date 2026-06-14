@@ -1,5 +1,10 @@
-"""chart-creator: an Open Notebook creator that turns notebook content into
-AntV G2 chart specs (emitted as ``chart_spec.v1``, rendered client-side).
+"""chart-creator: an Open Notebook creator that turns notebook content into a chart.
+
+The LLM designs it as an AntV Infographic DSL string using the ``chart-*`` templates
+(line / column / bar / pie / wordcloud), emitted as ``infographic.v2`` and rendered
+client-side to SVG by the ``@antv/infographic`` engine. Non-chart infographic
+templates are produced by infographic-creator. Earlier versions emitted raw AntV G2
+specs as ``chart_spec.v1``.
 """
 
 import json
@@ -17,21 +22,19 @@ from open_notebook_creator_sdk import (
     CreatorManifest,
     ModelRoleSpec,
 )
-from open_notebook_creator_sdk.schemas import ChartSpecV1
+from open_notebook_creator_sdk.schemas import InfographicV2
 from pydantic import BaseModel, Field
 
-__version__ = "0.1.1"
-
-_ALLOWED_TYPES = {"interval", "line", "point", "area", "bar", "rect", "cell", "text"}
+__version__ = "0.2.0"
 
 
 class ChartsConfig(BaseModel):
-    max_charts: int = Field(default=3, ge=1, le=8, description="Maximum charts to generate")
-    # Visual theme applied to the rendered AntV chart (client-side). "auto" follows
-    # the app's light/dark mode. Values map to G2's official theme names.
-    theme: Literal[
-        "auto", "light", "dark", "classic", "classicDark", "academy"
-    ] = Field(default="auto", description="Chart theme")
+    # AntV Infographic theme applied client-side. "auto" follows the app's
+    # light/dark mode; "hand-drawn" is a sketchy preset. The DSL's own palette
+    # still layers colour on top of the base theme.
+    theme: Literal["auto", "light", "dark", "hand-drawn"] = Field(
+        default="auto", description="Chart theme"
+    )
 
 
 def _strip_fences(text: str) -> str:
@@ -43,13 +46,16 @@ def _strip_fences(text: str) -> str:
 
 
 def _valid_spec(spec: object) -> bool:
-    if not isinstance(spec, dict):
+    """A usable AntV chart DSL: a non-empty string whose first non-blank line is
+    ``infographic chart-...``. The DSL is the contract; validation stays loose so
+    new AntV chart templates need no code change."""
+    if not isinstance(spec, str):
         return False
-    t = spec.get("type")
-    if not isinstance(t, str) or t not in _ALLOWED_TYPES:
-        return False
-    data = spec.get("data")
-    return isinstance(data, list) and len(data) > 0
+    for line in spec.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped.startswith("infographic chart-")
+    return False
 
 
 class ChartCreator(BaseCreator):
@@ -61,15 +67,15 @@ class ChartCreator(BaseCreator):
             key="charts",
             name="Charts",
             version=__version__,
-            description="LLM-generated AntV charts rendered in the browser.",
-            sdk_compat=">=0.1,<1",
-            emits=["chart_spec.v1"],
+            description="LLM-designed AntV chart of the key quantitative insight.",
+            sdk_compat=">=0.2,<1",
+            emits=["infographic.v2"],
             model_roles=[
                 ModelRoleSpec(
                     key="text",
                     kind="language",
                     requires=["structured_json"],
-                    description="LLM that designs the chart specs.",
+                    description="LLM that designs the chart.",
                 )
             ],
             icon="bar-chart-3",
@@ -81,23 +87,23 @@ class ChartCreator(BaseCreator):
         if role is None:
             return CreationResult(
                 status="FAILURE",
-                schema_id="chart_spec.v1",
+                schema_id="infographic.v2",
                 data={},
                 errors=[CreationError(phase="setup", message="missing 'text' model role")],
                 user_message="No language model was provided for chart generation.",
             )
 
-        template = resources.files("chart_creator.prompts").joinpath(
-            "charts.jinja"
-        ).read_text()
+        prompts = resources.files("chart_creator.prompts")
+        template = prompts.joinpath("charts.jinja").read_text()
+        antv_syntax = prompts.joinpath("antv_syntax.md").read_text()
         prompt = Prompter(template_text=template).render(
             {
                 "content": request.content.text,
-                "max_charts": cfg.max_charts,
+                "antv_syntax": antv_syntax,
                 "instructions": request.instructions,
             }
         )
-        llm = role.create_language(structured={"type": "json"}, max_tokens=4000)
+        llm = role.create_language(structured={"type": "json"}, max_tokens=6000)
         resp = await llm.ainvoke(prompt)
         raw = resp.content if hasattr(resp, "content") else str(resp)
         try:
@@ -106,42 +112,31 @@ class ChartCreator(BaseCreator):
             logger.error(f"charts: non-JSON response: {e}")
             return CreationResult(
                 status="FAILURE",
-                schema_id="chart_spec.v1",
+                schema_id="infographic.v2",
                 data={},
                 errors=[CreationError(phase="parse", message=f"invalid JSON: {e}", retryable=True)],
                 user_message="The model returned an unparseable response. Please retry.",
             )
 
-        all_specs = parsed.get("specs", []) if isinstance(parsed, dict) else []
-        good = [s for s in all_specs if _valid_spec(s)]
-        dropped = len(all_specs) - len(good)
-        good = good[: cfg.max_charts]
-
-        warnings: list[str] = []
-        errors: list[CreationError] = []
-        if dropped > 0:
-            warnings.append(f"Dropped {dropped} invalid chart spec(s).")
-            errors.append(CreationError(phase="validate", message=f"{dropped} invalid specs"))
-
-        if not good:
+        spec = parsed.get("spec") if isinstance(parsed, dict) else None
+        if not _valid_spec(spec):
             return CreationResult(
                 status="FAILURE",
-                schema_id="chart_spec.v1",
+                schema_id="infographic.v2",
                 data={},
-                warnings=warnings,
-                errors=errors or [CreationError(phase="generate", message="no valid charts")],
-                user_message="No valid charts could be generated from this content.",
+                errors=[CreationError(phase="generate", message="no valid chart spec", retryable=True)],
+                user_message="No valid chart could be generated from this content.",
             )
 
-        data = ChartSpecV1(
-            title=parsed.get("title") if isinstance(parsed, dict) else None,
-            specs=good,
+        title = parsed.get("title")
+        data = InfographicV2(
+            title=title if isinstance(title, str) and title.strip() else None,
+            spec=spec.strip(),
+            theme=cfg.theme,
         ).model_dump()
 
         return CreationResult(
-            status="PARTIAL" if errors else "SUCCESS",
-            schema_id="chart_spec.v1",
+            status="SUCCESS",
+            schema_id="infographic.v2",
             data=data,
-            warnings=warnings,
-            errors=errors,
         )

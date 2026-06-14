@@ -1,8 +1,8 @@
 [project]
 name = "chart-creator"
-version = "0.1.1"
+version = "0.2.0"
 license = "MIT"
-description = "Open Notebook creator: LLM-generated AntV charts (chart_spec.v1)"
+description = "Open Notebook creator: LLM-designed AntV charts (infographic.v2)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

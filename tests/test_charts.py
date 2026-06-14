@@ -1,4 +1,4 @@
-"""Tests for ChartCreator with a stubbed language model (no network)."""
+"""Tests for ChartCreator (infographic.v2 / AntV chart DSL) with a stubbed model."""
 
 from __future__ import annotations
 
@@ -9,6 +9,17 @@ import pytest
 from chart_creator import ChartCreator
 from open_notebook_creator_sdk import ContentBundle, CreationRequest, ModelRole
 from open_notebook_creator_sdk.testing import assert_creator_compliant, assert_result_compliant
+
+_SPEC = (
+    "infographic chart-column-simple\n"
+    "data\n"
+    "  title Revenue by region\n"
+    "  values\n"
+    "    - label North\n"
+    "      value 120\n"
+    "    - label South\n"
+    "      value 90\n"
+)
 
 
 class _FakeResp:
@@ -40,18 +51,13 @@ def test_static_compliance():
 
 
 @pytest.mark.asyncio
-async def test_generate_valid_specs():
+async def test_generate_valid_spec():
     creator = ChartCreator()
-    payload = {
-        "title": "Sales",
-        "specs": [
-            {"type": "interval", "data": [{"category": "A", "value": 3}], "encode": {"x": "category", "y": "value"}}
-        ],
-    }
+    payload = {"title": "Sales", "spec": _SPEC}
     with tempfile.TemporaryDirectory() as td:
         req = CreationRequest(
             content=ContentBundle(text="Some content"),
-            config={"max_charts": 3},
+            config={"theme": "auto"},
             models={"text": _role(payload)},
             output_dir=td,
             artifact_id="a",
@@ -59,20 +65,16 @@ async def test_generate_valid_specs():
         result = await creator.generate(req)
         assert result.status == "SUCCESS"
         assert_result_compliant(creator, result)
-        assert len(result.data["specs"]) == 1
+        assert result.schema_id == "infographic.v2"
+        assert result.data["spec"].startswith("infographic chart-")
+        assert result.data["library"] == "antv-infographic"
 
 
 @pytest.mark.asyncio
-async def test_partial_on_some_invalid_specs():
+async def test_failure_when_not_a_chart_template():
     creator = ChartCreator()
-    payload = {
-        "title": "Mixed",
-        "specs": [
-            {"type": "interval", "data": [{"category": "A", "value": 3}]},
-            {"type": "nonsense"},          # invalid type
-            {"type": "line", "data": []},  # empty data -> invalid
-        ],
-    }
+    # a valid infographic DSL, but a non-chart template -> rejected by charts creator
+    payload = {"title": "T", "spec": "infographic list-grid-simple\ndata\n  lists\n    - label x"}
     with tempfile.TemporaryDirectory() as td:
         req = CreationRequest(
             content=ContentBundle(text="x"),
@@ -81,18 +83,16 @@ async def test_partial_on_some_invalid_specs():
             artifact_id="a",
         )
         result = await creator.generate(req)
-        assert result.status == "PARTIAL"
-        assert len(result.data["specs"]) == 1
-        assert result.warnings
+        assert result.status == "FAILURE"
 
 
 @pytest.mark.asyncio
-async def test_failure_when_all_invalid():
+async def test_failure_when_spec_missing():
     creator = ChartCreator()
     with tempfile.TemporaryDirectory() as td:
         req = CreationRequest(
             content=ContentBundle(text="x"),
-            models={"text": _role({"specs": [{"type": "bogus"}]})},
+            models={"text": _role({"title": "T"})},
             output_dir=td,
             artifact_id="a",
         )
@@ -103,7 +103,7 @@ async def test_failure_when_all_invalid():
 @pytest.mark.asyncio
 async def test_strips_markdown_fences():
     creator = ChartCreator()
-    obj = {"title": "T", "specs": [{"type": "interval", "data": [{"category": "A", "value": 1}]}]}
+    obj = {"title": "T", "spec": _SPEC}
     fenced = "```json\n" + json.dumps(obj) + "\n```"
     with tempfile.TemporaryDirectory() as td:
         req = CreationRequest(
@@ -115,39 +115,6 @@ async def test_strips_markdown_fences():
         result = await creator.generate(req)
         assert result.status == "SUCCESS"
         assert result.data["title"] == "T"
-
-
-@pytest.mark.asyncio
-async def test_empty_specs_is_failure():
-    creator = ChartCreator()
-    with tempfile.TemporaryDirectory() as td:
-        req = CreationRequest(
-            content=ContentBundle(text="x"),
-            models={"text": _role({"specs": []})},
-            output_dir=td,
-            artifact_id="a",
-        )
-        result = await creator.generate(req)
-        assert result.status == "FAILURE"
-
-
-@pytest.mark.asyncio
-async def test_respects_max_charts():
-    creator = ChartCreator()
-    specs = [
-        {"type": "interval", "data": [{"category": "A", "value": i}]} for i in range(5)
-    ]
-    with tempfile.TemporaryDirectory() as td:
-        req = CreationRequest(
-            content=ContentBundle(text="x"),
-            config={"max_charts": 2},
-            models={"text": _role({"specs": specs})},
-            output_dir=td,
-            artifact_id="a",
-        )
-        result = await creator.generate(req)
-        assert result.status == "SUCCESS"
-        assert len(result.data["specs"]) == 2
 
 
 @pytest.mark.asyncio
