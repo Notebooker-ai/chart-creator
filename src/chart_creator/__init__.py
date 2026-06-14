@@ -20,7 +20,7 @@ from open_notebook_creator_sdk import (
 from open_notebook_creator_sdk.schemas import ChartSpecV1
 from pydantic import BaseModel, Field
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 _ALLOWED_TYPES = {"interval", "line", "point", "area", "bar", "rect", "cell", "text"}
 
@@ -94,6 +94,7 @@ class ChartCreator(BaseCreator):
             {
                 "content": request.content.text,
                 "max_charts": cfg.max_charts,
+                "instructions": request.instructions,
             }
         )
         llm = role.create_language(structured={"type": "json"}, max_tokens=4000)

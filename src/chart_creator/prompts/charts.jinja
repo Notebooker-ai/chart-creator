@@ -1,6 +1,10 @@
 You are a data-visualization expert producing specs for the AntV G2 (v5) library.
 From the research content below, design {{ max_charts }} chart(s) that best
 summarize the key quantitative insights.
+{% if instructions %}
+Additional instructions from the user (follow these closely):
+{{ instructions }}
+{% endif %}
 
 Each chart is a G2 v5 spec object passed directly to `chart.options(spec)`. Use
 this minimal, reliable structure per chart:
