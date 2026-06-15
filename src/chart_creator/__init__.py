@@ -25,7 +25,7 @@ from open_notebook_creator_sdk import (
 from open_notebook_creator_sdk.schemas import InfographicV2
 from pydantic import BaseModel, Field
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 
 class ChartsConfig(BaseModel):
@@ -34,6 +34,13 @@ class ChartsConfig(BaseModel):
     # still layers colour on top of the base theme.
     theme: Literal["auto", "light", "dark", "hand-drawn"] = Field(
         default="auto", description="Chart theme"
+    )
+    count: int = Field(
+        default=1,
+        ge=1,
+        le=6,
+        title="Number to generate",
+        description="How many to generate; each one uses a different design and emphasis.",
     )
 
 
