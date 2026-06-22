@@ -20,12 +20,13 @@ from open_notebook_creator_sdk import (
     CreationRequest,
     CreationResult,
     CreatorManifest,
+    CreatorView,
     ModelRoleSpec,
 )
 from open_notebook_creator_sdk.schemas import InfographicV2
 from pydantic import BaseModel, Field
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 
 class ChartsConfig(BaseModel):
@@ -75,7 +76,7 @@ class ChartCreator(BaseCreator):
             name="Charts",
             version=__version__,
             description="LLM-designed AntV chart of the key quantitative insight.",
-            sdk_compat=">=0.2,<1",
+            sdk_compat=">=0.4,<1",
             emits=["infographic.v2"],
             model_roles=[
                 ModelRoleSpec(
@@ -86,6 +87,7 @@ class ChartCreator(BaseCreator):
                 )
             ],
             icon="bar-chart-3",
+            view=CreatorView(entry="view/index.html"),
         )
 
     async def generate(self, request: CreationRequest) -> CreationResult:
