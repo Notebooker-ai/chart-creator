@@ -1,16 +1,19 @@
 """chart-creator: an Open Notebook creator that turns notebook content into a chart.
 
-The LLM designs it as an AntV Infographic DSL string using the ``chart-*`` templates
-(line / column / bar / pie / wordcloud), emitted as ``infographic.v2`` and rendered
-client-side to SVG by the ``@antv/infographic`` engine. Non-chart infographic
-templates are produced by infographic-creator. Earlier versions emitted raw AntV G2
-specs as ``chart_spec.v1``.
+The LLM designs the chart as a **Flint** (microsoft/flint-chart) unified input — a
+declarative ``{data, semantic_types, chart_spec}`` object — targeting one of three
+rendering libraries: **Vega-Lite**, **ECharts**, or **Chart.js**. It is emitted as
+``flint.v1`` and compiled + rendered client-side by the shipped self-contained view
+bundle (``view/index.html``). The user picks a library and chart type in the creation
+modal, or leaves either on "Auto" and lets the model choose the best fit for the data.
+
+Browse chart examples: https://microsoft.github.io/flint-chart/#/gallery
 """
 
 import json
 import re
 from importlib import resources
-from typing import ClassVar, Literal
+from typing import Annotated, ClassVar, Literal, Union
 
 from ai_prompter import Prompter
 from loguru import logger
@@ -23,18 +26,72 @@ from open_notebook_creator_sdk import (
     CreatorView,
     ModelRoleSpec,
 )
-from open_notebook_creator_sdk.schemas import InfographicV2
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-__version__ = "0.3.0"
+from .chart_types import (
+    CHART_CATALOG_MARKDOWN,
+    CHART_TYPES_BY_LIBRARY,
+    CHARTJS_TYPES,
+    ECHARTS_TYPES,
+    VEGA_LITE_TYPES,
+)
+
+__version__ = "0.4.0"
+
+LIBRARIES = ("vega-lite", "echarts", "chartjs")
+GALLERY_URL = "https://microsoft.github.io/flint-chart/#/gallery"
+
+# Chart-type enums per library, generated from Flint's own template defs (see
+# chart_types.py). "auto" lets the model pick the best chart type for the data.
+_VL_TYPES = Literal[("auto", *VEGA_LITE_TYPES)]  # type: ignore[valid-type]
+_EC_TYPES = Literal[("auto", *ECHARTS_TYPES)]  # type: ignore[valid-type]
+_CJS_TYPES = Literal[("auto", *CHARTJS_TYPES)]  # type: ignore[valid-type]
+
+
+class AutoEngine(BaseModel):
+    """Auto — the model picks both the rendering library and the chart type."""
+
+    model_config = ConfigDict(title="Auto")
+    library: Literal["auto"] = "auto"
+
+
+class VegaLiteEngine(BaseModel):
+    model_config = ConfigDict(title="Vega-Lite")
+    library: Literal["vega-lite"] = "vega-lite"
+    chart_type: _VL_TYPES = Field(default="auto", title="Chart type")
+
+
+class EChartsEngine(BaseModel):
+    model_config = ConfigDict(title="ECharts")
+    library: Literal["echarts"] = "echarts"
+    chart_type: _EC_TYPES = Field(default="auto", title="Chart type")
+
+
+class ChartjsEngine(BaseModel):
+    model_config = ConfigDict(title="Chart.js")
+    library: Literal["chartjs"] = "chartjs"
+    chart_type: _CJS_TYPES = Field(default="auto", title="Chart type")
+
+
+Engine = Annotated[
+    Union[AutoEngine, VegaLiteEngine, EChartsEngine, ChartjsEngine],
+    Field(discriminator="library"),
+]
 
 
 class ChartsConfig(BaseModel):
-    # AntV Infographic theme applied client-side. "auto" follows the app's
-    # light/dark mode; "hand-drawn" is a sketchy preset. The DSL's own palette
-    # still layers colour on top of the base theme.
-    theme: Literal["auto", "light", "dark", "hand-drawn"] = Field(
-        default="auto", description="Chart theme"
+    theme: Literal["auto", "light", "dark"] = Field(
+        default="auto",
+        title="Theme",
+        description="Chart theme; 'auto' follows the app's light/dark mode.",
+    )
+    engine: Engine = Field(
+        default_factory=AutoEngine,
+        title="Chart engine",
+        description=(
+            "Rendering library and chart type. Selecting a library reveals its chart "
+            f"types; leave on 'Auto' to let the model choose. Browse examples: {GALLERY_URL}"
+        ),
     )
     count: int = Field(
         default=1,
@@ -53,17 +110,19 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def _valid_spec(spec: object) -> bool:
-    """A usable AntV chart DSL: a non-empty string whose first non-blank line is
-    ``infographic chart-...``. The DSL is the contract; validation stays loose so
-    new AntV chart templates need no code change."""
-    if not isinstance(spec, str):
+def _valid_flint(library: object, spec: object) -> bool:
+    """A usable Flint artifact: a known library plus a ``{data.values, chart_spec.chartType}``
+    input whose chart type is one the chosen library supports."""
+    if library not in LIBRARIES or not isinstance(spec, dict):
         return False
-    for line in spec.splitlines():
-        stripped = line.strip()
-        if stripped:
-            return stripped.startswith("infographic chart-")
-    return False
+    data = spec.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("values"), list) or not data["values"]:
+        return False
+    chart_spec = spec.get("chart_spec")
+    if not isinstance(chart_spec, dict):
+        return False
+    chart_type = chart_spec.get("chartType")
+    return chart_type in CHART_TYPES_BY_LIBRARY[library]
 
 
 class ChartCreator(BaseCreator):
@@ -75,9 +134,9 @@ class ChartCreator(BaseCreator):
             key="charts",
             name="Charts",
             version=__version__,
-            description="LLM-designed AntV chart of the key quantitative insight.",
+            description="LLM-designed Flint chart (Vega-Lite / ECharts / Chart.js) of the key insight.",
             sdk_compat=">=0.4,<1",
-            emits=["infographic.v2"],
+            emits=["flint.v1"],
             model_roles=[
                 ModelRoleSpec(
                     key="text",
@@ -91,25 +150,34 @@ class ChartCreator(BaseCreator):
         )
 
     async def generate(self, request: CreationRequest) -> CreationResult:
-        cfg = ChartsConfig.model_validate(request.config)
+        cfg = ChartsConfig.model_validate(request.config or {})
         role = request.models.get("text")
         if role is None:
             return CreationResult(
                 status="FAILURE",
-                schema_id="infographic.v2",
+                schema_id="flint.v1",
                 data={},
                 errors=[CreationError(phase="setup", message="missing 'text' model role")],
                 user_message="No language model was provided for chart generation.",
             )
 
+        # Resolve what the user pinned in the modal (None == "auto", model chooses).
+        engine = cfg.engine
+        library_pin = None if engine.library == "auto" else engine.library
+        chart_type_pin = getattr(engine, "chart_type", "auto")
+        chart_type_pin = None if library_pin is None or chart_type_pin == "auto" else chart_type_pin
+
         prompts = resources.files("chart_creator.prompts")
         template = prompts.joinpath("charts.jinja").read_text()
-        antv_syntax = prompts.joinpath("antv_syntax.md").read_text()
+        flint_syntax = prompts.joinpath("flint_syntax.md").read_text()
         prompt = Prompter(template_text=template).render(
             {
                 "content": request.content.text,
-                "antv_syntax": antv_syntax,
+                "flint_syntax": flint_syntax,
+                "chart_catalog": CHART_CATALOG_MARKDOWN,
                 "instructions": request.instructions,
+                "library_pin": library_pin,
+                "chart_type_pin": chart_type_pin,
             }
         )
         llm = role.create_language(structured={"type": "json"}, max_tokens=6000)
@@ -121,31 +189,44 @@ class ChartCreator(BaseCreator):
             logger.error(f"charts: non-JSON response: {e}")
             return CreationResult(
                 status="FAILURE",
-                schema_id="infographic.v2",
+                schema_id="flint.v1",
                 data={},
                 errors=[CreationError(phase="parse", message=f"invalid JSON: {e}", retryable=True)],
                 user_message="The model returned an unparseable response. Please retry.",
             )
 
-        spec = parsed.get("spec") if isinstance(parsed, dict) else None
-        if not _valid_spec(spec):
-            return CreationResult(
-                status="FAILURE",
-                schema_id="infographic.v2",
-                data={},
-                errors=[CreationError(phase="generate", message="no valid chart spec", retryable=True)],
-                user_message="No valid chart could be generated from this content.",
-            )
+        if not isinstance(parsed, dict):
+            return self._invalid_result()
+
+        # Enforce the user's pins over whatever the model returned.
+        library = library_pin or parsed.get("library")
+        spec = parsed.get("input")
+        if isinstance(spec, dict) and chart_type_pin and isinstance(spec.get("chart_spec"), dict):
+            spec["chart_spec"]["chartType"] = chart_type_pin
+
+        if not _valid_flint(library, spec):
+            return self._invalid_result()
+
+        # Fill client-side rendering defaults the model may omit.
+        chart_spec = spec["chart_spec"]
+        chart_spec.setdefault("canvasSize", {"width": 640, "height": 400})
+        spec.setdefault("options", {"addTooltips": True})
 
         title = parsed.get("title")
-        data = InfographicV2(
-            title=title if isinstance(title, str) and title.strip() else None,
-            spec=spec.strip(),
-            theme=cfg.theme,
-        ).model_dump()
+        data = {
+            "title": title if isinstance(title, str) and title.strip() else None,
+            "library": library,
+            "input": spec,
+            "theme": cfg.theme,
+        }
+        return CreationResult(status="SUCCESS", schema_id="flint.v1", data=data)
 
+    @staticmethod
+    def _invalid_result() -> CreationResult:
         return CreationResult(
-            status="SUCCESS",
-            schema_id="infographic.v2",
-            data=data,
+            status="FAILURE",
+            schema_id="flint.v1",
+            data={},
+            errors=[CreationError(phase="generate", message="no valid chart", retryable=True)],
+            user_message="No valid chart could be generated from this content.",
         )

@@ -1,27 +1,49 @@
 You are a data-visualization designer. From the research content below, design ONE
-chart using the AntV Infographic engine, expressed as a short declarative DSL string
-(NOT prose). Choose the chart template that best summarizes the key quantitative
-insight in the content.
+chart using **Flint** (a visualization language that compiles to Vega-Lite, ECharts, or
+Chart.js). Express it as a Flint input object. Choose the chart that best summarizes the
+key quantitative insight in the content.
 {% if instructions %}
 Additional instructions from the user (follow these closely):
 {{ instructions }}
 {% endif %}
 
-Use only the `chart-*` templates below. Derive the data points from the content; do
-not invent precise figures you cannot support — prefer qualitative/relative values
-when unsure. Keep the chart focused on one comparison or trend.
+Derive the data points from the content; do not invent precise figures you cannot
+support — prefer qualitative/relative values when unsure. Keep the chart focused on one
+comparison or trend. Write all text (title, labels) in the same language as the content.
 
-Write text in the same language as the research content.
+{% if library_pin %}
+LIBRARY: You MUST use the "{{ library_pin }}" library. Set "library" to "{{ library_pin }}".
+{% else %}
+LIBRARY: Choose the library ("vega-lite", "echarts", or "chartjs") whose chart types best
+express the insight. Set "library" to your choice.
+{% endif %}
+{% if chart_type_pin %}
+CHART TYPE: You MUST use the "{{ chart_type_pin }}" chart type. Set chart_spec.chartType to
+"{{ chart_type_pin }}".
+{% else %}
+CHART TYPE: Pick the chartType from the chosen library's catalog that best fits the data.
+{% endif %}
 
-{{ antv_syntax }}
+{{ flint_syntax }}
+
+Chart types available per library (pick a chartType valid for your chosen library):
+
+{{ chart_catalog }}
 
 Return ONLY valid JSON (no prose, no markdown fences) matching exactly:
 {
   "title": "Short headline",
-  "spec": "infographic chart-...\ndata\n  ..."
+  "library": "vega-lite" | "echarts" | "chartjs",
+  "input": {
+    "data": { "values": [ { "field": value, ... }, ... ] },
+    "semantic_types": { "field": "SemanticType", ... },
+    "chart_spec": {
+      "chartType": "<one of the chosen library's chart types>",
+      "encodings": { "x": { "field": "..." }, "y": { "field": "..." } },
+      "canvasSize": { "width": 640, "height": 400 }
+    }
+  }
 }
-
-The "spec" value is the full AntV Infographic DSL string (with real newlines).
 
 Research content:
 {{ content }}

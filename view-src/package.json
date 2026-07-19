@@ -1,0 +1,23 @@
+{
+  "name": "chart-creator-view",
+  "private": true,
+  "version": "0.4.0",
+  "description": "Build for the self-contained Flint chart view bundle shipped at src/chart_creator/view/index.html",
+  "type": "module",
+  "scripts": {
+    "gen": "node gen-chart-types.mjs",
+    "build": "node build.mjs",
+    "all": "npm run gen && npm run build"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  },
+  "dependencies": {
+    "flint-chart": "^0.2.2",
+    "vega": "^5.30.0",
+    "vega-lite": "^5.21.0",
+    "vega-embed": "^6.29.0",
+    "echarts": "^5.5.1",
+    "chart.js": "^4.4.6"
+  }
+}
