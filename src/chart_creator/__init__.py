@@ -147,6 +147,10 @@ class ChartCreator(BaseCreator):
             ],
             icon="bar-chart-3",
             view=CreatorView(entry="view/index.html"),
+            suggestion_hint=(
+                "which quantities, trends, or comparisons to chart, how to break them "
+                "down, and which chart form best carries the point"
+            ),
         )
 
     async def generate(self, request: CreationRequest) -> CreationResult:
