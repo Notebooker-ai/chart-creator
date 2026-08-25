@@ -71,8 +71,10 @@ async def test_generate_valid_flint():
         assert result.schema_id == "flint.v1"
         assert result.data["library"] == "vega-lite"
         assert result.data["input"]["chart_spec"]["chartType"] == "Bar Chart"
-        # rendering defaults are filled in for the view bundle
-        assert "canvasSize" in result.data["input"]["chart_spec"]
+        # canvasSize is left to the view bundle, which sizes to its container —
+        # a baked default rendered as a tiny fixed chart in the card's corner.
+        assert "canvasSize" not in result.data["input"]["chart_spec"]
+        assert result.data["input"]["options"] == {"addTooltips": True}
         assert result.data["theme"] == "auto"
 
 
@@ -178,3 +180,101 @@ def test_manifest_declares_view_bundle_and_it_ships():
         assert lib in html.lower()
     # vendored offline: inline <script> blocks are fine, but nothing loads remotely
     assert 'src="http' not in html
+
+
+class _SequenceRole(ModelRole):
+    """Returns each payload in turn — for exercising the corrective retry."""
+
+    payloads: list = []
+
+    def create_language(self, **_):
+        payloads = list(self.payloads)
+
+        class _LLM:
+            async def ainvoke(self, _prompt):
+                return _FakeResp(payloads.pop(0) if len(payloads) > 1 else payloads[0])
+
+        return _LLM()
+
+
+def _seq_req(payloads, **kw):
+    return CreationRequest(
+        content=ContentBundle(text="Some content"),
+        config={},
+        models={"text": _SequenceRole(provider="f", model="f", payloads=[json.dumps(p) for p in payloads])},
+        **kw,
+    )
+
+
+@pytest.mark.asyncio
+async def test_decline_when_content_has_no_quantities():
+    """The honest way out: {"chart": null, "reason": ...} fails cleanly instead
+    of charting invented numbers."""
+    creator = ChartCreator()
+    with tempfile.TemporaryDirectory() as td:
+        result = await creator.generate(
+            _req({"chart": None, "reason": "The content is narrative history with no figures."}, {},
+                 output_dir=td, artifact_id="a")
+        )
+        assert result.status == "FAILURE"
+        assert result.errors[0].retryable is False
+        assert "narrative history" in result.user_message
+
+
+@pytest.mark.asyncio
+async def test_rejects_encoding_field_missing_from_rows():
+    creator = ChartCreator()
+    bad = json.loads(json.dumps(_PAYLOAD))
+    bad["input"]["chart_spec"]["encodings"]["y"] = {"field": "innovation"}
+    with tempfile.TemporaryDirectory() as td:
+        result = await creator.generate(_req(bad, {}, output_dir=td, artifact_id="a"))
+        assert result.status == "FAILURE"
+        assert "innovation" in result.errors[0].message
+
+
+@pytest.mark.asyncio
+async def test_rejects_duplicate_field_across_channels():
+    """A color legend duplicating the x axis carries no information."""
+    creator = ChartCreator()
+    bad = json.loads(json.dumps(_PAYLOAD))
+    bad["input"]["chart_spec"]["encodings"]["color"] = {"field": "region"}
+    with tempfile.TemporaryDirectory() as td:
+        result = await creator.generate(_req(bad, {}, output_dir=td, artifact_id="a"))
+        assert result.status == "FAILURE"
+
+
+@pytest.mark.asyncio
+async def test_rejects_category_only_encodings():
+    """Category-vs-category grids with no numeric measure are junk."""
+    creator = ChartCreator()
+    bad = {
+        "title": "Wars by duration",
+        "library": "vega-lite",
+        "input": {
+            "data": {"values": [
+                {"conflict": "Kitos War", "duration": "115-117 AD"},
+                {"conflict": "Bar Kokhba", "duration": "132-136 AD"},
+            ]},
+            "semantic_types": {"conflict": "Category", "duration": "Category"},
+            "chart_spec": {
+                "chartType": "Bar Chart",
+                "encodings": {"x": {"field": "conflict"}, "y": {"field": "duration"}},
+            },
+        },
+    }
+    with tempfile.TemporaryDirectory() as td:
+        result = await creator.generate(_req(bad, {}, output_dir=td, artifact_id="a"))
+        assert result.status == "FAILURE"
+        assert "numeric" in result.errors[0].message
+
+
+@pytest.mark.asyncio
+async def test_corrective_retry_recovers_from_bad_first_attempt():
+    """The validation error is fed back and the second attempt succeeds."""
+    creator = ChartCreator()
+    bad = json.loads(json.dumps(_PAYLOAD))
+    bad["input"]["chart_spec"]["encodings"]["y"] = {"field": "missing_field"}
+    with tempfile.TemporaryDirectory() as td:
+        result = await creator.generate(_seq_req([bad, _PAYLOAD], output_dir=td, artifact_id="a"))
+        assert result.status == "SUCCESS"
+        assert result.data["input"]["chart_spec"]["encodings"]["y"] == {"field": "revenue"}

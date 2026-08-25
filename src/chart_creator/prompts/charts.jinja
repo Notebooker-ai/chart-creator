@@ -7,9 +7,25 @@ Additional instructions from the user (follow these closely):
 {{ instructions }}
 {% endif %}
 
-Derive the data points from the content; do not invent precise figures you cannot
-support — prefer qualitative/relative values when unsure. Keep the chart focused on one
-comparison or trend. Write all text (title, labels) in the same language as the content.
+HONESTY RULES (hard requirements):
+- Every numeric value must be stated in the content or directly computable from it
+  (counting items the content lists is fine). NEVER invent scores, ratings, rankings,
+  or estimates the content does not state — a chart of made-up numbers is worse than
+  no chart at all.
+- Chart the SUBJECT of the content. Web-page furniture that leaked into scraped
+  sources — navigation menus, sidebar sections, link counts, "edit"/"donate" items —
+  is boilerplate, never data.
+- If the content contains no genuine quantities worth charting, do not force one.
+  Return exactly: {"chart": null, "reason": "<one short sentence saying what's missing>"}
+
+DESIGN RULES:
+- Every encoding channel must map to a DIFFERENT field. A color legend that duplicates
+  the x axis carries no information — omit the channel instead.
+- At least one encoded field must be a real measure with numeric values in the rows.
+  Never build category-vs-category grids where each pair occurs once.
+- Use at least 3 data rows unless the content genuinely only supports 2.
+- Keep the chart focused on one comparison or trend. Write all text (title, labels) in
+  the same language as the content.
 
 {% if library_pin %}
 LIBRARY: You MUST use the "{{ library_pin }}" library. Set "library" to "{{ library_pin }}".

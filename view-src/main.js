@@ -76,6 +76,15 @@ function vegaConfig(theme) {
   };
 }
 
+// Size the chart to the card it lives in. Flint bakes canvasSize into the
+// compiled spec as fixed pixels, so a hardcoded 640x400 renders as a tiny
+// chart pinned to the corner of a wide card — measure the container instead.
+function containerSize(el) {
+  const width = Math.max(320, el.clientWidth || rootEl().clientWidth || 640);
+  const height = Math.round(Math.min(480, Math.max(300, width * 0.55)));
+  return { width: width, height: height };
+}
+
 async function renderFlint(data, theme) {
   const library = data && data.library;
   const input = data && data.input;
@@ -88,9 +97,18 @@ async function renderFlint(data, theme) {
   }
 
   const el = chartDiv();
+  const size = containerSize(el);
+  if (input.chart_spec && typeof input.chart_spec === "object") {
+    input.chart_spec.canvasSize = size;
+  }
 
   if (library === "vega-lite") {
     const spec = assemble(input);
+    // Flint emits fixed pixel dimensions; hand layout back to Vega so the
+    // chart tracks the container across resizes.
+    spec.width = "container";
+    spec.autosize = { type: "fit", contains: "padding" };
+    el.style.width = "100%";
     await embed(el, spec, {
       actions: false,
       renderer: "svg",
@@ -103,12 +121,13 @@ async function renderFlint(data, theme) {
     const option = assemble(input);
     const chart = echarts.init(el, theme === "dark" ? "dark" : null, {
       renderer: "svg",
-      height: el.clientHeight || 360,
+      width: size.width,
+      height: size.height,
     });
     chart.setOption(option);
     chart.setOption({ backgroundColor: "transparent" });
     window.addEventListener("resize", function () {
-      chart.resize();
+      chart.resize({ width: el.clientWidth || size.width });
     });
     return;
   }
@@ -118,6 +137,7 @@ async function renderFlint(data, theme) {
     const p = palette(theme);
     Chart.defaults.color = p.muted;
     Chart.defaults.borderColor = p.grid;
+    el.style.height = size.height + "px";
     const canvas = document.createElement("canvas");
     el.appendChild(canvas);
     new Chart(canvas, config);
@@ -131,6 +151,13 @@ async function renderFlint(data, theme) {
 const renderers = {
   "flint.v1": renderFlint,
 };
+
+// Surface the underlying error so a broken spec is diagnosable from the card
+// instead of a bare "failed" with the detail lost inside the sandbox.
+function renderFailureMessage(e) {
+  const detail = e && e.message ? " (" + e.message + ")" : "";
+  return "Failed to render this artifact." + detail;
+}
 
 function applyTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme === "dark" ? "dark" : "light");
@@ -154,12 +181,12 @@ function onArtifact(msg) {
   try {
     const out = r(msg.data || {}, theme);
     if (out && typeof out.catch === "function") {
-      out.catch(function () {
-        empty("Failed to render this artifact.");
+      out.catch(function (e) {
+        empty(renderFailureMessage(e));
       });
     }
   } catch (e) {
-    empty("Failed to render this artifact.");
+    empty(renderFailureMessage(e));
   }
 }
 

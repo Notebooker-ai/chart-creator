@@ -36,7 +36,7 @@ from .chart_types import (
     VEGA_LITE_TYPES,
 )
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 LIBRARIES = ("vega-lite", "echarts", "chartjs")
 GALLERY_URL = "https://microsoft.github.io/flint-chart/#/gallery"
@@ -110,19 +110,66 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def _valid_flint(library: object, spec: object) -> bool:
-    """A usable Flint artifact: a known library plus a ``{data.values, chart_spec.chartType}``
-    input whose chart type is one the chosen library supports."""
-    if library not in LIBRARIES or not isinstance(spec, dict):
-        return False
+def _flint_error(library: object, spec: object) -> str | None:
+    """Why this Flint input is unusable, or None when it passes.
+
+    Beyond the structural checks (known library, non-empty ``data.values``,
+    supported ``chartType``), this rejects the degenerate designs the model
+    slips into when the content has nothing quantitative: encodings that
+    reference fields absent from the rows, two channels sharing one field
+    (an x-duplicating legend), and specs where no encoded field carries
+    numeric values (category-vs-category identity grids).
+    """
+    if library not in LIBRARIES:
+        return f"unknown library {library!r}"
+    if not isinstance(spec, dict):
+        return "input is not an object"
     data = spec.get("data")
     if not isinstance(data, dict) or not isinstance(data.get("values"), list) or not data["values"]:
-        return False
+        return "data.values must be a non-empty list of rows"
+    rows = [row for row in data["values"] if isinstance(row, dict)]
+    if len(rows) < 2:
+        return "at least 2 data rows are required"
     chart_spec = spec.get("chart_spec")
     if not isinstance(chart_spec, dict):
-        return False
+        return "chart_spec is missing"
     chart_type = chart_spec.get("chartType")
-    return chart_type in CHART_TYPES_BY_LIBRARY[library]
+    if chart_type not in CHART_TYPES_BY_LIBRARY[library]:
+        return f"chartType {chart_type!r} is not valid for {library}"
+
+    encodings = chart_spec.get("encodings")
+    if not isinstance(encodings, dict) or not encodings:
+        return "chart_spec.encodings is missing"
+    row_keys = set().union(*(row.keys() for row in rows))
+    fields: dict = {}
+    for channel, enc in encodings.items():
+        field = enc.get("field") if isinstance(enc, dict) else None
+        if field is None:
+            continue
+        if field not in row_keys:
+            return f"encoding {channel!r} references field {field!r} not present in data rows"
+        if field in fields:
+            return (
+                f"channels {fields[field]!r} and {channel!r} both encode field "
+                f"{field!r} — each channel must map to a different field"
+            )
+        fields[field] = channel
+    if not fields:
+        return "no encoding references a field"
+
+    def _is_numeric(value: object) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    has_measure = any(
+        sum(_is_numeric(row.get(field)) for row in rows) >= max(1, len(rows) // 2)
+        for field in fields
+    )
+    if not has_measure:
+        return (
+            "no encoded field carries numeric values — charts need at least one "
+            "real measure, not category-vs-category pairs"
+        )
+    return None
 
 
 class ChartCreator(BaseCreator):
@@ -185,52 +232,86 @@ class ChartCreator(BaseCreator):
             }
         )
         llm = role.create_language(structured={"type": "json"}, max_tokens=6000)
-        resp = await llm.ainvoke(prompt)
-        raw = resp.content if hasattr(resp, "content") else str(resp)
-        try:
-            parsed = json.loads(_strip_fences(raw))
-        except json.JSONDecodeError as e:
-            logger.error(f"charts: non-JSON response: {e}")
-            return CreationResult(
-                status="FAILURE",
-                schema_id="flint.v1",
-                data={},
-                errors=[CreationError(phase="parse", message=f"invalid JSON: {e}", retryable=True)],
-                user_message="The model returned an unparseable response. Please retry.",
+
+        # One corrective retry: validation failures are fed back verbatim so the
+        # model can fix the specific defect instead of re-rolling blind.
+        last_error: str | None = None
+        for _attempt in range(2):
+            ask = prompt if last_error is None else (
+                prompt
+                + f"\n\nYour previous answer was rejected: {last_error}. "
+                + "Return only the corrected JSON."
             )
+            resp = await llm.ainvoke(ask)
+            raw = resp.content if hasattr(resp, "content") else str(resp)
+            try:
+                parsed = json.loads(_strip_fences(raw))
+            except json.JSONDecodeError as e:
+                logger.warning(f"charts: non-JSON response: {e}")
+                last_error = f"invalid JSON: {e}"
+                continue
 
-        if not isinstance(parsed, dict):
-            return self._invalid_result()
+            if not isinstance(parsed, dict):
+                last_error = "the response was not a JSON object"
+                continue
 
-        # Enforce the user's pins over whatever the model returned.
-        library = library_pin or parsed.get("library")
-        spec = parsed.get("input")
-        if isinstance(spec, dict) and chart_type_pin and isinstance(spec.get("chart_spec"), dict):
-            spec["chart_spec"]["chartType"] = chart_type_pin
+            # The honest way out: content with nothing quantitative yields an
+            # explicit decline, not a chart of invented numbers.
+            if "chart" in parsed and parsed.get("chart") is None:
+                reason = str(parsed.get("reason") or "").strip()
+                return CreationResult(
+                    status="FAILURE",
+                    schema_id="flint.v1",
+                    data={},
+                    errors=[
+                        CreationError(
+                            phase="generate",
+                            message=f"declined: {reason or 'no chartable quantities'}",
+                            retryable=False,
+                        )
+                    ],
+                    user_message=(
+                        "This content has no genuine quantities to chart"
+                        + (f": {reason}" if reason else ".")
+                    ),
+                )
 
-        if not _valid_flint(library, spec):
-            return self._invalid_result()
+            # Enforce the user's pins over whatever the model returned.
+            library = library_pin or parsed.get("library")
+            spec = parsed.get("input")
+            if isinstance(spec, dict) and chart_type_pin and isinstance(spec.get("chart_spec"), dict):
+                spec["chart_spec"]["chartType"] = chart_type_pin
 
-        # Fill client-side rendering defaults the model may omit.
-        chart_spec = spec["chart_spec"]
-        chart_spec.setdefault("canvasSize", {"width": 640, "height": 400})
-        spec.setdefault("options", {"addTooltips": True})
+            error = _flint_error(library, spec)
+            if error:
+                logger.warning(f"charts: rejected spec: {error}")
+                last_error = error
+                continue
 
-        title = parsed.get("title")
-        data = {
-            "title": title if isinstance(title, str) and title.strip() else None,
-            "library": library,
-            "input": spec,
-            "theme": cfg.theme,
-        }
-        return CreationResult(status="SUCCESS", schema_id="flint.v1", data=data)
+            # canvasSize is intentionally NOT defaulted here — the view bundle
+            # sizes the chart to its container; a baked 640x400 renders as a
+            # tiny fixed chart in the corner of the card.
+            spec.setdefault("options", {"addTooltips": True})
 
-    @staticmethod
-    def _invalid_result() -> CreationResult:
+            title = parsed.get("title")
+            data = {
+                "title": title if isinstance(title, str) and title.strip() else None,
+                "library": library,
+                "input": spec,
+                "theme": cfg.theme,
+            }
+            return CreationResult(status="SUCCESS", schema_id="flint.v1", data=data)
+
         return CreationResult(
             status="FAILURE",
             schema_id="flint.v1",
             data={},
-            errors=[CreationError(phase="generate", message="no valid chart", retryable=True)],
+            errors=[
+                CreationError(
+                    phase="generate",
+                    message=last_error or "no valid chart",
+                    retryable=True,
+                )
+            ],
             user_message="No valid chart could be generated from this content.",
         )
