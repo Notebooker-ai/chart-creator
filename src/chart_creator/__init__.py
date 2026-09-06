@@ -13,6 +13,7 @@ Browse chart examples: https://microsoft.github.io/flint-chart/#/gallery
 import json
 import re
 from importlib import resources
+from pathlib import Path
 from typing import Annotated, ClassVar, Literal, Union
 
 from ai_prompter import Prompter
@@ -20,12 +21,15 @@ from loguru import logger
 from open_notebook_creator_sdk import (
     BaseCreator,
     CreationError,
+    CreationFile,
     CreationRequest,
     CreationResult,
     CreatorManifest,
     CreatorView,
     ModelRoleSpec,
+    RenderRequest,
 )
+from open_notebook_creator_sdk.schemas import FlintV1
 from pydantic import BaseModel, ConfigDict, Field
 
 from .chart_types import (
@@ -36,7 +40,15 @@ from .chart_types import (
     VEGA_LITE_TYPES,
 )
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
+
+# The editable source: the final Flint unified input (``{data, semantic_types,
+# chart_spec, options}``) as JSON, stored next to the artifact as a
+# ``role="source"`` file. The host shows it in its source editor and hands it
+# back through :meth:`ChartCreator.render`. The rendering ``library`` is not
+# part of the Flint input; it is carried forward from the artifact's data.
+SOURCE_FILENAME = "chart.json"
+SOURCE_CONTENT_TYPE = "application/json"
 
 LIBRARIES = ("vega-lite", "echarts", "chartjs")
 GALLERY_URL = "https://microsoft.github.io/flint-chart/#/gallery"
@@ -172,6 +184,21 @@ def _flint_error(library: object, spec: object) -> str | None:
     return None
 
 
+def _write_source(output_dir: str, spec: dict) -> CreationFile:
+    """Write the final Flint input into ``output_dir`` and describe it as the
+    artifact's editable source file."""
+    (Path(output_dir) / SOURCE_FILENAME).write_text(
+        json.dumps(spec, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return CreationFile(
+        filename=SOURCE_FILENAME,
+        content_type=SOURCE_CONTENT_TYPE,
+        path=SOURCE_FILENAME,
+        role="source",
+        label="Source",
+    )
+
+
 class ChartCreator(BaseCreator):
     config_model: ClassVar[type] = ChartsConfig
 
@@ -194,6 +221,7 @@ class ChartCreator(BaseCreator):
             ],
             icon="bar-chart-3",
             view=CreatorView(entry="view/index.html"),
+            editable_source=True,
             suggestion_hint=(
                 "which quantities, trends, or comparisons to chart, how to break them "
                 "down, and which chart form best carries the point"
@@ -300,7 +328,12 @@ class ChartCreator(BaseCreator):
                 "input": spec,
                 "theme": cfg.theme,
             }
-            return CreationResult(status="SUCCESS", schema_id="flint.v1", data=data)
+            return CreationResult(
+                status="SUCCESS",
+                schema_id="flint.v1",
+                data=data,
+                files=[_write_source(request.output_dir, spec)],
+            )
 
         return CreationResult(
             status="FAILURE",
@@ -314,4 +347,53 @@ class ChartCreator(BaseCreator):
                 )
             ],
             user_message="No valid chart could be generated from this content.",
+        )
+
+    async def render(self, request: RenderRequest) -> CreationResult:
+        """Re-render from the (user-edited) Flint input. Deterministic — no LLM.
+
+        The input goes through the same validation and post-processing as a
+        freshly generated one, against the artifact's existing ``library``;
+        everything the source does not encode (title, theme, library) is
+        carried forward from the previous ``data``."""
+
+        def failure(message: str, user_message: str) -> CreationResult:
+            return CreationResult(
+                status="FAILURE",
+                schema_id="flint.v1",
+                data=request.data,
+                errors=[CreationError(phase="render", message=message, retryable=False)],
+                user_message=user_message,
+            )
+
+        source = next((s for s in request.sources if s.filename == SOURCE_FILENAME), None)
+        if source is None:
+            return failure(
+                f"source file '{SOURCE_FILENAME}' not provided",
+                f"The chart source ('{SOURCE_FILENAME}') is missing, so it cannot be re-rendered.",
+            )
+
+        try:
+            spec = json.loads(source.content.strip())
+        except json.JSONDecodeError as e:
+            return failure(
+                f"invalid JSON: {e}",
+                f"The edited chart source is not valid JSON: {e}.",
+            )
+
+        library = request.data.get("library", FlintV1().library)
+        error = _flint_error(library, spec)
+        if error:
+            return failure(
+                f"invalid Flint input: {error}",
+                f"The edited chart source is not a valid Flint chart input: {error}.",
+            )
+        spec.setdefault("options", {"addTooltips": True})
+
+        data = FlintV1.model_validate({**request.data, "input": spec}).model_dump()
+        return CreationResult(
+            status="SUCCESS",
+            schema_id="flint.v1",
+            data=data,
+            files=[_write_source(request.output_dir, data["input"])],
         )

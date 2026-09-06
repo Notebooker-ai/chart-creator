@@ -278,3 +278,126 @@ async def test_corrective_retry_recovers_from_bad_first_attempt():
         result = await creator.generate(_seq_req([bad, _PAYLOAD], output_dir=td, artifact_id="a"))
         assert result.status == "SUCCESS"
         assert result.data["input"]["chart_spec"]["encodings"]["y"] == {"field": "revenue"}
+
+
+# --- editable source + render -------------------------------------------------
+
+from pathlib import Path  # noqa: E402
+
+from open_notebook_creator_sdk import RenderRequest, SourceDoc  # noqa: E402
+
+_SOURCE_NAME = "chart.json"
+
+
+def test_manifest_declares_editable_source():
+    m = ChartCreator().manifest
+    assert m.editable_source is True
+
+
+@pytest.mark.asyncio
+async def test_generate_attaches_source_file_with_flint_input():
+    """The final Flint input is written to output_dir as JSON and declared as a
+    role='source' file so the host can offer edit -> re-render."""
+    creator = ChartCreator()
+    with tempfile.TemporaryDirectory() as td:
+        result = await creator.generate(_req(_PAYLOAD, {}, output_dir=td, artifact_id="a"))
+        assert result.status == "SUCCESS"
+        assert_result_compliant(creator, result)
+        sources = [f for f in result.files if f.role == "source"]
+        assert len(sources) == 1
+        src = sources[0]
+        assert src.filename == _SOURCE_NAME
+        assert src.path == _SOURCE_NAME
+        assert src.content_type == "application/json"
+        assert src.label == "Source"
+        assert json.loads((Path(td) / src.path).read_text()) == result.data["input"]
+
+
+def _render_req(td: str, sources: list, data: dict) -> RenderRequest:
+    return RenderRequest(sources=sources, data=data, output_dir=td, artifact_id="a")
+
+
+def _source(content: str) -> SourceDoc:
+    return SourceDoc(filename=_SOURCE_NAME, content_type="application/json", content=content)
+
+
+def _previous() -> dict:
+    return {
+        "library": "vega-lite",
+        "title": "Revenue by region",
+        "input": {**_PAYLOAD["input"], "options": {"addTooltips": True}},
+        "theme": "dark",
+    }
+
+
+@pytest.mark.asyncio
+async def test_render_with_edited_input_updates_data_and_carries_fields():
+    creator = ChartCreator()
+    edited = json.loads(json.dumps(_PAYLOAD["input"]))
+    edited["data"]["values"].append({"region": "East", "revenue": 42})
+    edited["chart_spec"]["chartType"] = "Line Chart"
+    text = json.dumps(edited, indent=2)
+    with tempfile.TemporaryDirectory() as td:
+        # The host writes the edited source into output_dir before render.
+        (Path(td) / _SOURCE_NAME).write_text(text)
+        result = await creator.render(_render_req(td, [_source(text)], _previous()))
+        assert result.status == "SUCCESS", result.errors
+        assert_result_compliant(creator, result)
+        assert result.schema_id == "flint.v1"
+        assert result.data["input"]["chart_spec"]["chartType"] == "Line Chart"
+        assert len(result.data["input"]["data"]["values"]) == 3
+        # generate()'s post-processing applies to edited sources too.
+        assert result.data["input"]["options"] == {"addTooltips": True}
+        assert result.data["title"] == "Revenue by region"
+        assert result.data["theme"] == "dark"
+        assert result.data["library"] == "vega-lite"
+        # The source is re-declared so the host keeps it for the next edit,
+        # and what sits on disk is the processed input.
+        sources = [f for f in result.files if f.role == "source"]
+        assert [f.filename for f in sources] == [_SOURCE_NAME]
+        assert json.loads((Path(td) / _SOURCE_NAME).read_text()) == result.data["input"]
+
+
+@pytest.mark.asyncio
+async def test_render_rejects_invalid_flint_input():
+    creator = ChartCreator()
+    bad = json.loads(json.dumps(_PAYLOAD["input"]))
+    bad["chart_spec"]["chartType"] = "Not A Real Chart"
+    text = json.dumps(bad)
+    with tempfile.TemporaryDirectory() as td:
+        (Path(td) / _SOURCE_NAME).write_text(text)
+        result = await creator.render(_render_req(td, [_source(text)], _previous()))
+        assert result.status == "FAILURE"
+        assert result.errors[0].phase == "render"
+        assert result.errors[0].retryable is False
+        assert "Not A Real Chart" in result.errors[0].message
+        assert "not a valid Flint chart input" in result.user_message
+        # Previous data is handed back untouched so the host can keep it.
+        assert result.data == _previous()
+
+
+@pytest.mark.asyncio
+async def test_render_rejects_malformed_json():
+    creator = ChartCreator()
+    text = '{"data": {"values": [}'
+    with tempfile.TemporaryDirectory() as td:
+        (Path(td) / _SOURCE_NAME).write_text(text)
+        result = await creator.render(_render_req(td, [_source(text)], _previous()))
+        assert result.status == "FAILURE"
+        assert result.errors[0].phase == "render"
+        assert "JSON" in result.user_message
+
+
+@pytest.mark.asyncio
+async def test_render_without_source_is_failure():
+    creator = ChartCreator()
+    with tempfile.TemporaryDirectory() as td:
+        req = _render_req(
+            td,
+            [SourceDoc(filename="other.txt", content_type="text/plain", content="x")],
+            _previous(),
+        )
+        result = await creator.render(req)
+        assert result.status == "FAILURE"
+        assert result.errors[0].phase == "render"
+        assert _SOURCE_NAME in result.user_message
