@@ -401,3 +401,24 @@ async def test_render_without_source_is_failure():
         assert result.status == "FAILURE"
         assert result.errors[0].phase == "render"
         assert _SOURCE_NAME in result.user_message
+
+
+@pytest.mark.asyncio
+async def test_denominator_cannot_be_used_as_a_bullet_chart_target(tmp_path):
+    payload = json.loads(json.dumps(_PAYLOAD))
+    payload["input"]["chart_spec"] = {"chartType": "Bullet Chart", "encodings": {"y": {"field": "session"}, "x": {"field": "correct_answers"}, "goal": {"field": "total_questions"}}}
+    payload["input"]["data"]["values"] = [{"session": day, "correct_answers": n, "total_questions": 12} for day, n in [("Monday", 6), ("Wednesday", 9), ("Saturday", 10)]]
+    result = await ChartCreator().generate(_req(payload, output_dir=str(tmp_path), artifact_id="a"))
+    assert result.status == "FAILURE"
+    assert "denominator" in result.errors[0].message.lower()
+
+
+@pytest.mark.asyncio
+async def test_source_qualifications_are_preserved_in_chart_source(tmp_path):
+    payload = json.loads(json.dumps(_PAYLOAD))
+    payload["input"]["caption"] = "Fictional counts do not establish causation."
+    result = await ChartCreator().generate(_req(payload, output_dir=str(tmp_path), artifact_id="a"))
+    assert result.status == "SUCCESS"
+    assert result.data["input"]["caption"] == payload["input"]["caption"]
+    source = json.loads((tmp_path / "chart.json").read_text())
+    assert source["caption"] == payload["input"]["caption"]

@@ -19,6 +19,18 @@ HONESTY RULES (hard requirements):
   Return exactly: {"chart": null, "reason": "<one short sentence saying what's missing>"}
 
 DESIGN RULES:
+- A denominator (such as 12 total questions) is NOT a performance target. Use a
+  neutral bar or line chart for recall progress. Use Bullet Chart only when the
+  source explicitly defines a goal/target and evaluative thresholds.
+- Label fictional or illustrative quantities explicitly as "Not research evidence"
+  in the chart title, using the same language as the content.
+- Put source qualifications in input.caption, not only the title. For a fictional
+  classroom example, state that the counts do not establish causation or a
+  universal study schedule. Keep the caption brief and grounded in the source.
+- Discrete counts need whole-number ticks; preserve the denominator and units.
+  For counts out of a known total, add "denominator": N to that measure encoding
+  (e.g. "y": {"field":"Correct answers (out of 12)","denominator":12}).
+  This sets the full axis range without treating the total as a target.
 - Every encoding channel must map to a DIFFERENT field. A color legend that duplicates
   the x axis carries no information — omit the channel instead.
 - At least one encoded field must be a real measure with numeric values in the rows.
@@ -51,6 +63,7 @@ Return ONLY valid JSON (no prose, no markdown fences) matching exactly:
   "title": "Short headline",
   "library": "vega-lite" | "echarts" | "chartjs",
   "input": {
+    "caption": "Brief source qualifications, if applicable",
     "data": { "values": [ { "field": value, ... }, ... ] },
     "semantic_types": { "field": "SemanticType", ... },
     "chart_spec": {

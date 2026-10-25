@@ -7,6 +7,7 @@
 //
 // Built by build.mjs into ../src/chart_creator/view/index.html — do not edit the
 // generated HTML by hand.
+import {countChannels, vegaCountAxes, denominatorDomain} from "./axes.js";
 import { assembleVegaLite, assembleECharts, assembleChartjs } from "flint-chart";
 import embed from "vega-embed";
 import * as echarts from "echarts";
@@ -89,6 +90,12 @@ async function renderFlint(data, theme) {
   const library = data && data.library;
   const input = data && data.input;
   freshRoot(data && data.title);
+  if (typeof input?.caption === 'string' && input.caption.trim()) {
+    const caption = document.createElement('p');
+    caption.className = 'caption';
+    caption.textContent = input.caption;
+    rootEl().appendChild(caption);
+  }
 
   const assemble = ASSEMBLE[library];
   if (!assemble || !input) {
@@ -98,15 +105,18 @@ async function renderFlint(data, theme) {
 
   const el = chartDiv();
   const size = containerSize(el);
+  const counts = countChannels(input);
+  const domains = Object.fromEntries(counts.map(({channel,field}) => [field,denominatorDomain(input,channel,field)]));
   if (input.chart_spec && typeof input.chart_spec === "object") {
     input.chart_spec.canvasSize = size;
   }
 
   if (library === "vega-lite") {
-    const spec = assemble(input);
+    const spec = vegaCountAxes(assemble(input), counts.map(c => c.field), domains);
     // Flint emits fixed pixel dimensions; hand layout back to Vega so the
     // chart tracks the container across resizes.
     spec.width = "container";
+    if (!spec.hconcat && !spec.vconcat && !spec.concat && !spec.facet) spec.height = size.height;
     spec.autosize = { type: "fit", contains: "padding" };
     el.style.width = "100%";
     await embed(el, spec, {
@@ -119,6 +129,16 @@ async function renderFlint(data, theme) {
 
   if (library === "echarts") {
     const option = assemble(input);
+    counts.forEach(({channel}) => {
+      const axes = option[`${channel}Axis`];
+      (Array.isArray(axes) ? axes : [axes]).filter(Boolean).forEach(axis => {
+        if (axis.type === 'value') {
+          axis.minInterval = 1;
+          const field = counts.find(c => c.channel === channel).field;
+          if (domains[field]) [axis.min,axis.max] = domains[field];
+        }
+      });
+    });
     const chart = echarts.init(el, theme === "dark" ? "dark" : null, {
       renderer: "svg",
       width: size.width,
@@ -134,6 +154,13 @@ async function renderFlint(data, theme) {
 
   if (library === "chartjs") {
     const config = assemble(input);
+    counts.forEach(({channel,field}) => {
+      config.options ||= {};
+      config.options.scales ||= {};
+      config.options.scales[channel] ||= {};
+      if (domains[field]) [config.options.scales[channel].min,config.options.scales[channel].max] = domains[field];
+      config.options.scales[channel].ticks = {...config.options.scales[channel].ticks, precision: 0};
+    });
     const p = palette(theme);
     Chart.defaults.color = p.muted;
     Chart.defaults.borderColor = p.grid;

@@ -40,7 +40,7 @@ from .chart_types import (
     VEGA_LITE_TYPES,
 )
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 # The editable source: the final Flint unified input (``{data, semantic_types,
 # chart_spec, options}``) as JSON, stored next to the artifact as a
@@ -152,6 +152,10 @@ def _flint_error(library: object, spec: object) -> str | None:
     encodings = chart_spec.get("encodings")
     if not isinstance(encodings, dict) or not encodings:
         return "chart_spec.encodings is missing"
+    goal = encodings.get("goal", {})
+    goal_field = str(goal.get("field", "")) if isinstance(goal, dict) else ""
+    if "bullet" in str(chart_type).lower() and re.search(r"total|denominator", goal_field, re.I):
+        return "A denominator is not a performance target; use a neutral bar or line chart"
     row_keys = set().union(*(row.keys() for row in rows))
     fields: dict = {}
     for channel, enc in encodings.items():

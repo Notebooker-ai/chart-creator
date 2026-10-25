@@ -30,3 +30,6 @@ jobs:
 
       - name: Run tests
         run: uv run pytest -v
+
+      - name: Run renderer regression tests
+        run: node --test view-src/axes.test.mjs
